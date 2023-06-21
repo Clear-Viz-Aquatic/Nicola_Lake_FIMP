@@ -1,0 +1,50 @@
+---
+title: "Script 1: 2011 Data Checking and Neatening"
+output: html_notebook
+---
+
+
+
+```{r}
+library(tidyverse)
+library(sf)
+```
+
+
+```{r, for now spatial data is stored here}
+map_dir="C:/Users/Rachel/Clear Viz Aquatic Consulting/LLC 2023 FIMP RFPs - General/Nicola_Lake_FIMP_RFP/Mapping"
+shp_2012_dir=file.path(map_dir,"Data_2012")
+```
+
+# Load Data
+```{r}
+fim_pt=st_read(shp_2012_dir,"Nicola_Lake_FIM_Points")
+```
+```{r}
+fim_veg_poly=st_read(shp_2012_dir,"Nicola_Lake_Vegetation")
+```
+
+```{r}
+fim_seg_brk=st_read(shp_2012_dir,"Nicola_Lake_Segment_Break")
+fim_seg_brk
+```
+```{r}
+fim_seg=st_read(shp_2012_dir,"Nicola_Lake_FIM")
+```
+
+# Proof Data
+```{r}
+fim_pt %>% tibble() %>% group_by(Descriptio) %>% tally() #these numbers do match what is in the report #154 groynes and 15 boat launches
+#check numbers in actual database
+```
+```{r}
+fim_veg_poly %>%  tibble() %>% group_by(Category) %>% tally()
+```
+```{r}
+ggplot(fim_veg_poly )+geom_sf(aes(fill=Category))
+```
+```{r}
+fim_seg %>% tibble()
+```
+
+

@@ -1,0 +1,235 @@
+---
+title: "Script 2: Base Data Download and Complile"
+output: html_notebook
+---
+
+```{r}
+library(sf)
+library(tidyverse)
+library(bcdata)
+library(arcgisbinding)
+arc.check_product()
+library(reticulate)
+library(data.table)
+library(lubridate)
+```
+# Set output geodatbase
+
+```{r, create database to dump files to}
+use_python("C:/Program Files/ArcGIS/Pro/bin/Python/envs/arcgispro-py3/python.exe", required = TRUE)
+ARCPY=import("arcpy")
+out_path="C:/Users/Rachel/Clear Viz Aquatic Consulting/LLC 2023 FIMP RFPs - General/Nicola_Lake_FIMP_RFP/Mapping"
+ARCPY$CreateFileGDB_management(out_path,"Base_Data")
+out_gdb=file.path(out_path,"Base_Data.gdb")
+```
+
+
+
+# Create Temp Study Area
+```{r, get Nicola Lake}
+fwa_nlake=bcdc_query_geodata(record="cb1e3aba-d3fe-4de1-a2d4-b8b6650fb1f6") %>% filter(GNIS_NAME_1 == "Nicola Lake") %>% collect()
+```
+
+```{r, make 500 m buffer around shoreline}
+nl_bf500m=fwa_nlake %>% st_buffer(dist=500) %>% st_union() %>% st_as_sf()
+```
+
+```{r}
+sa_raw=fwa_nlake
+```
+
+```{r}
+sa_alb=nl_bf500m %>% mutate(temp_col=1) %>% select(temp_col)
+```
+
+
+
+```{r, make 8 km buffer for clipping extent one side}
+sa_bf8k_raw=sa_raw %>% st_buffer(dist=8000) %>% st_union()
+```
+
+
+
+```{r}
+sa_fint=sa_bf8k_raw %>% st_as_sf() %>% mutate(temp_col=1) %>% select(temp_col) %>% rename(geometry=x) 
+```
+
+```{r}
+crs_out=26910
+```
+
+
+## Functions
+```{r, function to export bcdata directly out}
+custom_query_wout=function(record_id,sp_in){
+  all_md=bcdc_get_record(record_id)
+  
+  #create metadata
+  use_python("C:/Program Files/ArcGIS/Pro/bin/Python/envs/arcgispro-py3/python.exe", required = TRUE)
+  ARCPY=import("arcpy")
+  
+    cols_date=sp_in %>% tibble() %>% select(contains("DATE"))
+  if(ncol(cols_date)>0){
+    sp_in=sp_in %>% mutate_at(vars(matches("DATE")),~round_date(as.POSIXct(.x, format = "%F"),"day"))
+      
+  }
+ 
+  
+  new_md=ARCPY$metadata$Metadata()
+  new_md$title = all_md$title
+  new_md$tags = all_md$tags %>% map(function(x) unlist(tibble(x))) %>% bind_rows() %>% pull(x.display_name) %>%    paste(collapse=",")
+  new_md$credits = all_md$organization$full_title
+  new_md$accessConstraints = all_md$license_title
+  
+  #ARCPY$new_md.summary = 'My Summary'
+  new_md$description =  all_md$object_table_comments
+  #end metadata creation
+  
+ 
+  fc_name=str_replace_all("[[:space:]]|\\-|\\:","_",string=all_md$title)
+  fc_name=str_replace_all("\\(|\\)|\\,","",string=fc_name)
+  arc.write(file.path(out_gdb,fc_name),sp_in %>% st_transform(crs=crs_out),overwrite=TRUE,validate=TRUE)
+  #end spatial data creation
+  
+ 
+  
+  #write out metadata to feature class
+  path1=file.path(out_gdb,fc_name)
+     tgt_item_md = ARCPY$metadata$Metadata(path1)
+     tgt_item_md$isReadOnly
+     tgt_item_md$copy(new_md)
+    tgt_item_md$save()
+  
+}
+```
+
+
+```{r, fwa streams}
+rid="92344413-8035-4c08-b996-65a9b3f62fca"
+fwa_str_all=bcdc_query_geodata(rid) %>%  
+  filter( !FEATURE_SOURCE %in% c("lake-def skelet","lake-interm ske","lake-indef skel","OP") ) %>% filter(INTERSECTS(sa_fint)) %>% collect() 
+custom_query_wout(rid, fwa_str_all)
+```
+
+```{r, FWA Rivers}
+rid="f7dac054-efbf-402f-ab62-6fc4b32a619e"
+fwa_riv=bcdc_query_geodata(rid) %>% filter(INTERSECTS(sa_fint))  %>% collect()
+ggplot(fwa_riv)+geom_sf()
+custom_query_wout(rid, fwa_riv)
+```
+
+```{r, FWA Lakes}
+rid="cb1e3aba-d3fe-4de1-a2d4-b8b6650fb1f6"
+fwa_lk=bcdc_query_geodata(rid) %>% filter(INTERSECTS(sa_fint)) %>% collect()
+ggplot(fwa_lk)+geom_sf()
+custom_query_wout(rid, fwa_lk)
+```
+```{r, FWA Wetlands}
+rid="93b413d8-1840-4770-9629-641d74bd1cc6"
+fwa_wet=bcdc_query_geodata(rid) %>% filter(INTERSECTS(sa_fint)) %>% collect()
+ggplot(fwa_wet)+geom_sf()
+custom_query_wout(rid, fwa_wet)
+```
+
+
+```{r, DRA}
+rid="bb060417-b6e6-4548-b837-f9060d94743e"
+dra=bcdc_query_geodata(rid)  %>% filter(INTERSECTS(sa_fint)) %>% collect()
+dra %>% tibble()
+ggplot(dra)+geom_sf()
+custom_query_wout(rid, dra)
+```
+
+
+## Additional Layers
+
+### Species at Risk Datasets
+```{r, critical hab}
+rid="076b8c98-a3f1-429b-9dae-03faed0c6aef"
+ch=bcdc_query_geodata(rid)  %>% filter(INTERSECTS(sa_alb)) %>% collect() 
+ch %>% tibble()
+ggplot(ch)+geom_sf(aes(fill=COMMON_NAME_ENGLISH))
+custom_query_wout(rid, ch)
+```
+
+```{r, cdc public occurences}
+rid="0e035e55-f257-458f-9a96-80c01c69d389"
+cdc_occ=bcdc_query_geodata(rid)  %>% filter(INTERSECTS(sa_alb)) %>% collect() %>% st_intersection(sa_alb) %>% select(-temp_col) 
+cdc_occ
+custom_query_wout(rid, cdc_occ)
+
+```
+
+```{r, cdc mask occurence}
+rid="69c200fa-a6c5-4c07-a6f6-9179dab28c53"
+cdc_mask=bcdc_query_geodata(rid)  %>% filter(INTERSECTS(sa_alb)) %>% collect() %>% st_intersection(sa_alb) %>% select(-temp_col)
+cdc_mask
+custom_query_wout(rid, cdc_mask)
+```
+
+### Fish Data
+```{r}
+#date is not writing out correctly
+rid="aca81811-4b08-4382-9af7-204e0b9d2448"
+fish_obs=bcdc_query_geodata(rid)  %>% filter(INTERSECTS(sa_alb)) %>% collect() %>% st_intersection(sa_alb) %>% select(-temp_col) %>% filter(year(OBSERVATION_DATE) >1999)
+fish_obs %>% tibble()
+ggplot(fish_obs)+geom_sf()
+fish_obs %>% tibble() %>% distinct(SPECIES_CODE,SPECIES_NAME)
+custom_query_wout(rid, fish_obs)
+```
+
+```{r,fisheries sensitive watersheds}
+#no fisheries sensitive watersheds in study area
+#rid="2f1ac4a9-71ad-4900-8a08-96cc0bf48618"
+#fish_sens_wat=bcdc_query_geodata(rid)  %>% filter(INTERSECTS(sa_fint)) %>% collect() %>% st_intersection(sa_fint) %>% #select(-temp_col)
+#
+```
+
+### Other Data
+```{r, water right lic}
+#no current water lic?
+#select out just surface water
+rid="5549cae0-c2b1-4b96-9777-529d9720803c"
+water_lic=bcdc_query_geodata(rid)  %>% filter(INTERSECTS(sa_alb)) %>% collect() %>% st_intersection(sa_alb)  %>%
+  filter(POD_STATUS == "Active")
+water_lic %>% tibble() %>% distinct(PURPOSE_USE)
+#only Nicola Lake
+water_lic_nl=water_lic %>% filter(SOURCE_NAME == "Nicola Lake") 
+custom_query_wout(rid, water_lic_nl)
+```
+
+
+```{r, crown lease tenure}
+bcdc_search("Crown Lease Tenure")
+rid="9d4acb8e-535f-4845-8876-ec79bee1844f"
+cr_lease=bcdc_query_geodata(rid)  %>% filter(INTERSECTS(sa_alb)) %>% collect() 
+cr_lease %>% tibble()
+custom_query_wout(rid, cr_lease)
+```
+```{r, range tenure}
+
+rid="10b1b187-1ef5-421f-8aa2-f716379fdb99"
+rg_ten=bcdc_query_geodata(rid)  %>% filter(INTERSECTS(sa_alb)) %>% collect() %>% st_intersection(sa_alb) %>% filter(LIFE_CYCLE_STATUS_CODE == "ACTIVE")
+rg_ten%>% tibble()
+custom_query_wout(rid, rg_ten)
+```
+```{r,first nation reserve}
+rid="8efe9193-80d2-4fdf-a18c-d531a94196ad"
+fn_res=bcdc_query_geodata(rid)  %>% filter(INTERSECTS(sa_alb)) %>% collect() 
+fn_res %>% tibble()
+custom_query_wout(rid, fn_res)
+```
+
+
+
+```{r}
+arc.write(file.path(out_gdb,"Nicola_Lake_Buffer_500m"),sa_alb %>% st_transform(crs=26910))
+```
+
+# Do Clipping of AOL Datasets
+```{r}
+sa_file=file.path(out_gdb,"Nicola_Lake_Buffer_500m")
+parcel_data="https://services3.arcgis.com/Byd0XH4lLctQNFNt/arcgis/rest/services/Open_Cadastral_view/FeatureServer/0"
+ARCPY$Clip_analysis(in_features = parcel_data,clip_features = sa_file,out_feature_class = file.path(out_gdb,"TNRD_Parcels_500m_bf"))
+```
+
