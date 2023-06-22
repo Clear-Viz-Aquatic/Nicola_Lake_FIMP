@@ -19,16 +19,111 @@ library(lubridate)
 use_python("C:/Program Files/ArcGIS/Pro/bin/Python/envs/arcgispro-py3/python.exe", required = TRUE)
 ARCPY=import("arcpy")
 out_path="C:/Users/Rachel/Clear Viz Aquatic Consulting/LLC 2023 FIMP RFPs - General/Nicola_Lake_FIMP_RFP/Mapping"
-ARCPY$CreateFileGDB_management(out_path,"Base_Data")
+#ARCPY$CreateFileGDB_management(out_path,"Base_Data")
 out_gdb=file.path(out_path,"Base_Data.gdb")
 ```
 
+```{r}
+map_dir="C:/Users/Rachel/Clear Viz Aquatic Consulting/LLC 2023 FIMP RFPs - General/Nicola_Lake_FIMP_RFP/Mapping"
+shp_2012_dir=file.path(map_dir,"Data_2012")
+```
 
 
-# Create Temp Study Area
+# Create Temp Study Area and Segments
 ```{r, get Nicola Lake}
 fwa_nlake=bcdc_query_geodata(record="cb1e3aba-d3fe-4de1-a2d4-b8b6650fb1f6") %>% filter(GNIS_NAME_1 == "Nicola Lake") %>% collect()
 ```
+
+```{r}
+fwa_nlake_ml=fwa_nlake %>% st_cast("MULTILINESTRING") %>% st_transform(crs=26910)
+```
+
+```{r, read in segment breaks}
+# had to remove segment breaks that weren't including in final report mapping?
+fim_seg_brk=st_read(shp_2012_dir,"Nicola_Lake_Segment_Break") %>% rownames_to_column(var="rowid") 
+```
+
+
+
+```{r,function for snapping points to lake shoreline }
+st_snap_points = function(x, y, max_dist = 100) {
+
+  if (inherits(x, "sf")) n = nrow(x)
+  if (inherits(x, "sfc")) n = length(x)
+
+  out = do.call(c,
+                lapply(seq(n), function(i) {
+                  nrst = st_nearest_points(st_geometry(x)[i], y)
+                  nrst_len = st_length(nrst)
+                  nrst_mn = which.min(nrst_len)
+                  if (as.vector(nrst_len[nrst_mn]) > max_dist) return(st_geometry(x)[i] )
+                  return(st_cast(nrst[nrst_mn], "POINT")[2])
+                })
+  )
+  return(out %>% st_as_sf())
+}
+
+
+
+seg_pt=fim_seg_brk %>% slice(1)
+pt_along_seg=st_snap_points(seg_pt,fwa_nlake_ml) 
+
+```
+
+
+```{r, snap segment breaks to shoreline}
+snap_pts_shore=fim_seg_brk %>% rownames_to_column(var="uid") %>% group_by(uid) %>% group_map(~st_snap_points(.x,fwa_nlake_ml)) %>% bind_rows()
+```
+
+```{r, split shoreline based on segment breaks}
+#split does not work well form points make polygons instead
+on_line_all = st_cast(snap_pts_shore, "POINT")
+split_polys<- st_combine(st_buffer(on_line_all,0.05))
+temp_seg_line=st_split(fwa_nlake_ml,split_polys) %>% st_collection_extract(c("LINESTRING"))
+#drop the small splits because of the buffer
+temp_seg_line=temp_seg_line %>% mutate(len_m=as.numeric(st_length(temp_seg_line))) %>% filter(len_m > 1)  %>%
+  rownames_to_column(var="tempid") %>% select(tempid)
+
+#tempid 1 and 43 have a break and should not
+man_line=temp_seg_line %>% filter(tempid %in% c(1,43)) %>% st_union() %>% st_as_sf() %>% mutate(tempid="1") %>% 
+  rename("geometry"=x)
+temp_seg_no_1_43=temp_seg_line %>% filter(!tempid %in% c(1,43))
+temp_seg_line=man_line %>% bind_rows(temp_seg_no_1_43)
+
+
+temp_seg_line=temp_seg_line %>% mutate(tempid=as.numeric(tempid)) %>% mutate(Seg_No_2011=case_when(tempid >7 ~42- (tempid-8),
+                                                                                     TRUE ~ 8-tempid)) %>%
+  arrange(Seg_No_2011)
+arc.write(file.path(out_gdb,"Temp_Segment_Lines"),temp_seg_line,overwrite=TRUE)
+#write out snapped points
+arc.write(file.path(out_gdb,"Temp_Seg_Breaks"),snap_pts_shore %>% mutate(Name="Break Point"),overwrite=TRUE)
+```
+
+
+```{r}
+st_read(out_gdb,"Temp_Segment_Lines") %>% tibble()
+```
+
+```{r, make temp pages for field maps}
+seg_for_pages=temp_seg_line %>% mutate(Seg_Page_Name=case_when(Seg_No_2011 %in% c(2,3)~"2-3",
+                                                  Seg_No_2011 %in% c(10,11,12)~"10-12",
+                                                 Seg_No_2011 %in% c(13,14)~"13-14",
+                                                  Seg_No_2011 %in% c(16,17)~"16-17",
+                                                 Seg_No_2011 %in% c(18,19,20)~"18-20",
+                                                 Seg_No_2011 %in% c(25,26)~"25-26",
+                                                 Seg_No_2011 %in% c(31,32)~"31-32",
+                                                 Seg_No_2011 %in% c(33,34)~"33-34",
+                                                  Seg_No_2011 %in% c(36,37)~"36-37",
+                                                  Seg_No_2011 %in% c(38,39,40)~"38-40",
+                                                 TRUE ~as.character(Seg_No_2011)
+                                                 )) %>%
+  group_by(Seg_Page_Name) %>% summarize() %>% mutate(page_num=as.numeric(str_extract(Seg_Page_Name,"^[0-9]+")))
+```
+
+```{r}
+arc.write(file.path(out_gdb,"Seg_For_Pages"),seg_for_pages,overwrite=TRUE)
+```
+
 
 ```{r, make 500 m buffer around shoreline}
 nl_bf500m=fwa_nlake %>% st_buffer(dist=500) %>% st_union() %>% st_as_sf()
